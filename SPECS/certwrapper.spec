@@ -24,7 +24,7 @@ BuildRequires: nss-tools
 BuildRequires: efitools
 BuildRequires: gnu-efi-devel
 BuildRequires: openssl
-BuildRequires: xssign-macros
+BuildRequires: xcpsign-macros
 
 %description
 This package contains certificates for Secure Boot, packaged in an EFI
@@ -35,7 +35,7 @@ binary. The certificates are used by Shim.
 
 %build
 > db.esl
-for cert in GRUB_SIGN_KEY_XS9 XEN_SIGN_KEY_XS9 LINUX_SIGN_KEY_XS9; do
+for cert in GRUB_SIGN_KEY_XCP9 XEN_SIGN_KEY_XCP9 LINUX_SIGN_KEY_XCP9; do
     %fetchcert -c "$cert" -o "${cert}.cer"
     openssl x509 -inform der -in "${cert}.cer" -outform pem -out "${cert}.crt"
     cert-to-efi-sig-list "${cert}.crt" "${cert}.esl"
@@ -53,8 +53,8 @@ fi
 
 make CFLAGS="-I/usr/include/efi"
 
-%sign -c SHIM_EMBEDDED_SIGN_KEY_XS9 -i certwrapper.efi -o certwrapper-signed.efi
-%sign -c SHIM_EMBEDDED_SIGN_KEY_XS9 -i revocations.efi -o revocations-signed.efi
+%sign -c SHIM_EMBEDDED_SIGN_KEY_XCP9 -i certwrapper.efi -o certwrapper-signed.efi
+%sign -c SHIM_EMBEDDED_SIGN_KEY_XCP9 -i revocations.efi -o revocations-signed.efi
 
 
 %install
@@ -66,6 +66,10 @@ install -m 755 revocations-signed.efi %{buildroot}/boot/efi/EFI/xenserver/revoca
 /boot/efi/EFI/xenserver/*
 
 %changelog
+* Wed Jun 10 2026 Corentin Oparowski <corentin.oparowski@vates.tech> - 20240117-8
+- Changed certs for test with xcp-ng
+- Update dependencies to xcpsign-macros
+
 * Wed Oct 08 2025 Ross Lagerwall <ross.lagerwall@citrix.com> - 20240117-7
 - CP-47917: Re-sign with new key
 
