@@ -1,0 +1,1541 @@
+Set NX_COMPAT flag
+
+As the generated binary doesn't contain any code, it is trivially
+compatible with NX. Set the NX_COMPAT flag using the post-process-pe
+program from Shim.
+
+Signed-off-by: Ross Lagerwall <ross.lagerwall@citrix.com>
+diff --git a/.gitignore b/.gitignore
+index 5a703bdf9334..8362c7bf1777 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -11,6 +11,7 @@
+ 
+ # Executables
+ *.efi
++post-process-pe
+ 
+ # EFI Security Database files
+ *.esl
+diff --git a/Makefile b/Makefile
+index 1999a3dd3d91..91fe4c258de3 100644
+--- a/Makefile
++++ b/Makefile
+@@ -100,14 +100,18 @@ revocations.so : SOLIBS=
+ revocations.so : SOFLAGS=
+ revocations.efi : SECTIONS=.text .reloc .sbat .sbata .sbatl
+ 
+-%.efi : %.so
++%.efi : %.so post-process-pe
+ ifneq ($(OBJCOPY_GTE224),1)
+ 	$(error objcopy >= 2.24 is required)
+ endif
+ 	$(OBJCOPY) $(foreach section,$(SECTIONS),-j $(section) ) \
+ 		   --file-alignment 512 --section-alignment 4096 -D \
+ 		   $(OBJFLAGS) \
+-		   $(FORMAT) $^ $@
++		   $(FORMAT) $< $@
++	./post-process-pe -vv -n -x $@
++
++post-process-pe: post-process-pe.c
++	$(CC) -std=gnu11 -Og -g3 -Wall -Wextra -Wno-missing-field-initializers -Werror -o $@ $<
+ 
+ revocations.o : | $(SBATPATH) $(REVOCPATH)
+ revocations.o : /dev/null
+@@ -136,7 +140,7 @@ sbat_data.o : /dev/null
+ 	$(CC) $(BUILDFLAGS) -c -o $@ $^
+ 
+ clean :
+-	@rm -vf *.o *.so *.efi
++	@rm -vf *.o *.so *.efi post-process-pe
+ 
+ update :
+ 	git submodule update --init --recursive
+diff --git a/include/peimage.h b/include/peimage.h
+new file mode 100644
+index 000000000000..5d049686e99f
+--- /dev/null
++++ b/include/peimage.h
+@@ -0,0 +1,831 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++/*
++ * EFI image format for PE32, PE32+ and TE. Please note some data structures
++ * are different for PE32 and PE32+. EFI_IMAGE_NT_HEADERS32 is for PE32 and
++ * EFI_IMAGE_NT_HEADERS64 is for PE32+.
++ *
++ * This file is coded to the Visual Studio, Microsoft Portable Executable and
++ * Common Object File Format Specification, Revision 8.0 - May 16, 2006. This
++ * file also includes some definitions in PI Specification, Revision 1.0.
++ *
++ * Copyright (c) 2006 - 2010, Intel Corporation. All rights reserved.
++ * Portions copyright (c) 2008 - 2009, Apple Inc. All rights reserved.
++ */
++
++#ifndef SHIM_PEIMAGE_H
++#define SHIM_PEIMAGE_H
++
++#include "wincert.h"
++
++#define SIGNATURE_16(A, B) \
++	((UINT16)(((UINT16)(A)) | (((UINT16)(B)) << ((UINT16)8))))
++#define SIGNATURE_32(A, B, C, D)                 \
++	((UINT32)(((UINT32)SIGNATURE_16(A, B)) | \
++	          (((UINT32)SIGNATURE_16(C, D)) << (UINT32)16)))
++#define SIGNATURE_64(A, B, C, D, E, F, G, H)         \
++	((UINT64)((UINT64)SIGNATURE_32(A, B, C, D) | \
++	          ((UINT64)(SIGNATURE_32(E, F, G, H)) << (UINT64)32)))
++
++#define ALIGN_VALUE(Value, Alignment) ((Value) + (((Alignment) - (Value)) & ((Alignment) - 1)))
++#define ALIGN_POINTER(Pointer, Alignment) ((VOID *) (ALIGN_VALUE ((UINTN)(Pointer), (Alignment))))
++
++// Check if `val` is evenly aligned to the page size.
++#define IS_PAGE_ALIGNED(val) (!((val) & EFI_PAGE_MASK))
++
++//
++// PE32+ Subsystem type for EFI images
++//
++#define EFI_IMAGE_SUBSYSTEM_EFI_APPLICATION         10
++#define EFI_IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER 11
++#define EFI_IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER      12
++#define EFI_IMAGE_SUBSYSTEM_SAL_RUNTIME_DRIVER      13 ///< defined PI Specification, 1.0
++
++
++//
++// PE32+ Machine type for EFI images
++//
++#define IMAGE_FILE_MACHINE_I386            0x014c
++#define IMAGE_FILE_MACHINE_IA64            0x0200
++#define IMAGE_FILE_MACHINE_EBC             0x0EBC
++#define IMAGE_FILE_MACHINE_X64             0x8664
++#define IMAGE_FILE_MACHINE_ARMTHUMB_MIXED  0x01c2
++#define IMAGE_FILE_MACHINE_ARM64	   0xaa64
++
++//
++// EXE file formats
++//
++#define EFI_IMAGE_DOS_SIGNATURE     SIGNATURE_16('M', 'Z')
++#define EFI_IMAGE_OS2_SIGNATURE     SIGNATURE_16('N', 'E')
++#define EFI_IMAGE_OS2_SIGNATURE_LE  SIGNATURE_16('L', 'E')
++#define EFI_IMAGE_NT_SIGNATURE      SIGNATURE_32('P', 'E', '\0', '\0')
++
++///
++/// PE images can start with an optional DOS header, so if an image is run
++/// under DOS it can print an error message.
++///
++typedef struct {
++  UINT16  e_magic;    ///< Magic number.
++  UINT16  e_cblp;     ///< Bytes on last page of file.
++  UINT16  e_cp;       ///< Pages in file.
++  UINT16  e_crlc;     ///< Relocations.
++  UINT16  e_cparhdr;  ///< Size of header in paragraphs.
++  UINT16  e_minalloc; ///< Minimum extra paragraphs needed.
++  UINT16  e_maxalloc; ///< Maximum extra paragraphs needed.
++  UINT16  e_ss;       ///< Initial (relative) SS value.
++  UINT16  e_sp;       ///< Initial SP value.
++  UINT16  e_csum;     ///< Checksum.
++  UINT16  e_ip;       ///< Initial IP value.
++  UINT16  e_cs;       ///< Initial (relative) CS value.
++  UINT16  e_lfarlc;   ///< File address of relocation table.
++  UINT16  e_ovno;     ///< Overlay number.
++  UINT16  e_res[4];   ///< Reserved words.
++  UINT16  e_oemid;    ///< OEM identifier (for e_oeminfo).
++  UINT16  e_oeminfo;  ///< OEM information; e_oemid specific.
++  UINT16  e_res2[10]; ///< Reserved words.
++  UINT32  e_lfanew;   ///< File address of new exe header.
++} EFI_IMAGE_DOS_HEADER;
++
++///
++/// COFF File Header (Object and Image).
++///
++typedef struct {
++  UINT16  Machine;
++  UINT16  NumberOfSections;
++  UINT32  TimeDateStamp;
++  UINT32  PointerToSymbolTable;
++  UINT32  NumberOfSymbols;
++  UINT16  SizeOfOptionalHeader;
++  UINT16  Characteristics;
++} EFI_IMAGE_FILE_HEADER;
++
++///
++/// Size of EFI_IMAGE_FILE_HEADER.
++///
++#define EFI_IMAGE_SIZEOF_FILE_HEADER        20
++
++//
++// Characteristics
++//
++#define EFI_IMAGE_FILE_RELOCS_STRIPPED      (1 << 0)     ///< 0x0001  Relocation info stripped from file.
++#define EFI_IMAGE_FILE_EXECUTABLE_IMAGE     (1 << 1)     ///< 0x0002  File is executable  (i.e. no unresolved externel references).
++#define EFI_IMAGE_FILE_LINE_NUMS_STRIPPED   (1 << 2)     ///< 0x0004  Line nunbers stripped from file.
++#define EFI_IMAGE_FILE_LOCAL_SYMS_STRIPPED  (1 << 3)     ///< 0x0008  Local symbols stripped from file.
++#define EFI_IMAGE_FILE_BYTES_REVERSED_LO    (1 << 7)     ///< 0x0080  Bytes of machine word are reversed.
++#define EFI_IMAGE_FILE_32BIT_MACHINE        (1 << 8)     ///< 0x0100  32 bit word machine.
++#define EFI_IMAGE_FILE_DEBUG_STRIPPED       (1 << 9)     ///< 0x0200  Debugging info stripped from file in .DBG file.
++#define EFI_IMAGE_FILE_SYSTEM               (1 << 12)    ///< 0x1000  System File.
++#define EFI_IMAGE_FILE_DLL                  (1 << 13)    ///< 0x2000  File is a DLL.
++#define EFI_IMAGE_FILE_BYTES_REVERSED_HI    (1 << 15)    ///< 0x8000  Bytes of machine word are reversed.
++
++///
++/// Header Data Directories.
++///
++typedef struct {
++  UINT32  VirtualAddress;
++  UINT32  Size;
++} EFI_IMAGE_DATA_DIRECTORY;
++
++//
++// Directory Entries
++//
++#define EFI_IMAGE_DIRECTORY_ENTRY_EXPORT      0
++#define EFI_IMAGE_DIRECTORY_ENTRY_IMPORT      1
++#define EFI_IMAGE_DIRECTORY_ENTRY_RESOURCE    2
++#define EFI_IMAGE_DIRECTORY_ENTRY_EXCEPTION   3
++#define EFI_IMAGE_DIRECTORY_ENTRY_SECURITY    4
++#define EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC   5
++#define EFI_IMAGE_DIRECTORY_ENTRY_DEBUG       6
++#define EFI_IMAGE_DIRECTORY_ENTRY_COPYRIGHT   7
++#define EFI_IMAGE_DIRECTORY_ENTRY_GLOBALPTR   8
++#define EFI_IMAGE_DIRECTORY_ENTRY_TLS         9
++#define EFI_IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG 10
++
++#define EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES 16
++
++///
++/// @attention
++/// EFI_IMAGE_NT_OPTIONAL_HDR32_MAGIC means PE32 and
++/// EFI_IMAGE_OPTIONAL_HEADER32 must be used. The data structures only vary
++/// after NT additional fields.
++///
++#define EFI_IMAGE_NT_OPTIONAL_HDR32_MAGIC 0x10b
++
++///
++/// Optional Header Standard Fields for PE32.
++///
++typedef struct {
++  ///
++  /// Standard fields.
++  ///
++  UINT16                    Magic;
++  UINT8                     MajorLinkerVersion;
++  UINT8                     MinorLinkerVersion;
++  UINT32                    SizeOfCode;
++  UINT32                    SizeOfInitializedData;
++  UINT32                    SizeOfUninitializedData;
++  UINT32                    AddressOfEntryPoint;
++  UINT32                    BaseOfCode;
++  UINT32                    BaseOfData;  ///< PE32 contains this additional field, which is absent in PE32+.
++  ///
++  /// Optional Header Windows-Specific Fields.
++  ///
++  UINT32                    ImageBase;
++  UINT32                    SectionAlignment;
++  UINT32                    FileAlignment;
++  UINT16                    MajorOperatingSystemVersion;
++  UINT16                    MinorOperatingSystemVersion;
++  UINT16                    MajorImageVersion;
++  UINT16                    MinorImageVersion;
++  UINT16                    MajorSubsystemVersion;
++  UINT16                    MinorSubsystemVersion;
++  UINT32                    Win32VersionValue;
++  UINT32                    SizeOfImage;
++  UINT32                    SizeOfHeaders;
++  UINT32                    CheckSum;
++  UINT16                    Subsystem;
++  UINT16                    DllCharacteristics;
++  UINT32                    SizeOfStackReserve;
++  UINT32                    SizeOfStackCommit;
++  UINT32                    SizeOfHeapReserve;
++  UINT32                    SizeOfHeapCommit;
++  UINT32                    LoaderFlags;
++  UINT32                    NumberOfRvaAndSizes;
++  EFI_IMAGE_DATA_DIRECTORY  DataDirectory[EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES];
++} EFI_IMAGE_OPTIONAL_HEADER32;
++
++///
++/// @attention
++/// EFI_IMAGE_NT_OPTIONAL_HDR64_MAGIC means PE32+ and
++/// EFI_IMAGE_OPTIONAL_HEADER64 must be used. The data structures only vary
++/// after NT additional fields.
++///
++#define EFI_IMAGE_NT_OPTIONAL_HDR64_MAGIC 0x20b
++
++///
++/// Optional Header Standard Fields for PE32+.
++///
++typedef struct {
++  ///
++  /// Standard fields.
++  ///
++  UINT16                    Magic;
++  UINT8                     MajorLinkerVersion;
++  UINT8                     MinorLinkerVersion;
++  UINT32                    SizeOfCode;
++  UINT32                    SizeOfInitializedData;
++  UINT32                    SizeOfUninitializedData;
++  UINT32                    AddressOfEntryPoint;
++  UINT32                    BaseOfCode;
++  ///
++  /// Optional Header Windows-Specific Fields.
++  ///
++  UINT64                    ImageBase;
++  UINT32                    SectionAlignment;
++  UINT32                    FileAlignment;
++  UINT16                    MajorOperatingSystemVersion;
++  UINT16                    MinorOperatingSystemVersion;
++  UINT16                    MajorImageVersion;
++  UINT16                    MinorImageVersion;
++  UINT16                    MajorSubsystemVersion;
++  UINT16                    MinorSubsystemVersion;
++  UINT32                    Win32VersionValue;
++  UINT32                    SizeOfImage;
++  UINT32                    SizeOfHeaders;
++  UINT32                    CheckSum;
++  UINT16                    Subsystem;
++  UINT16                    DllCharacteristics;
++  UINT64                    SizeOfStackReserve;
++  UINT64                    SizeOfStackCommit;
++  UINT64                    SizeOfHeapReserve;
++  UINT64                    SizeOfHeapCommit;
++  UINT32                    LoaderFlags;
++  UINT32                    NumberOfRvaAndSizes;
++  EFI_IMAGE_DATA_DIRECTORY  DataDirectory[EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES];
++} EFI_IMAGE_OPTIONAL_HEADER64;
++
++#define EFI_IMAGE_DLLCHARACTERISTICS_RESERVED_0001         0x0001
++#define EFI_IMAGE_DLLCHARACTERISTICS_RESERVED_0002         0x0002
++#define EFI_IMAGE_DLLCHARACTERISTICS_RESERVED_0004         0x0004
++#define EFI_IMAGE_DLLCHARACTERISTICS_RESERVED_0008         0x0008
++#if 0 /* This is not in the PE spec. */
++#define EFI_IMAGE_DLLCHARACTERISTICS_RESERVED_0010         0x0010
++#endif
++#define EFI_IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA       0x0020
++#define EFI_IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE          0x0040
++#define EFI_IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY       0x0080
++#define EFI_IMAGE_DLLCHARACTERISTICS_NX_COMPAT             0x0100
++#define EFI_IMAGE_DLLCHARACTERISTICS_NO_ISOLATION          0x0200
++#define EFI_IMAGE_DLLCHARACTERISTICS_NO_SEH                0x0400
++#define EFI_IMAGE_DLLCHARACTERISTICS_NO_BIND               0x0800
++#define EFI_IMAGE_DLLCHARACTERISTICS_APPCONTAINER          0x1000
++#define EFI_IMAGE_DLLCHARACTERISTICS_WDM_DRIVER            0x2000
++#define EFI_IMAGE_DLLCHARACTERISTICS_GUARD_CF              0x4000
++#define EFI_IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE 0x8000
++
++///
++/// @attention
++/// EFI_IMAGE_NT_HEADERS32 is for use ONLY by tools.
++///
++typedef struct {
++  UINT32                      Signature;
++  EFI_IMAGE_FILE_HEADER       FileHeader;
++  EFI_IMAGE_OPTIONAL_HEADER32 OptionalHeader;
++} EFI_IMAGE_NT_HEADERS32;
++
++#define EFI_IMAGE_SIZEOF_NT_OPTIONAL32_HEADER sizeof (EFI_IMAGE_NT_HEADERS32)
++
++///
++/// @attention
++/// EFI_IMAGE_HEADERS64 is for use ONLY by tools.
++///
++typedef struct {
++  UINT32                      Signature;
++  EFI_IMAGE_FILE_HEADER       FileHeader;
++  EFI_IMAGE_OPTIONAL_HEADER64 OptionalHeader;
++} EFI_IMAGE_NT_HEADERS64;
++
++#define EFI_IMAGE_SIZEOF_NT_OPTIONAL64_HEADER sizeof (EFI_IMAGE_NT_HEADERS64)
++
++//
++// Other Windows Subsystem Values
++//
++#define EFI_IMAGE_SUBSYSTEM_UNKNOWN     0
++#define EFI_IMAGE_SUBSYSTEM_NATIVE      1
++#define EFI_IMAGE_SUBSYSTEM_WINDOWS_GUI 2
++#define EFI_IMAGE_SUBSYSTEM_WINDOWS_CUI 3
++#define EFI_IMAGE_SUBSYSTEM_OS2_CUI     5
++#define EFI_IMAGE_SUBSYSTEM_POSIX_CUI   7
++
++///
++/// Length of ShortName.
++///
++#define EFI_IMAGE_SIZEOF_SHORT_NAME 8
++
++///
++/// Section Table. This table immediately follows the optional header.
++///
++typedef struct {
++  UINT8 Name[EFI_IMAGE_SIZEOF_SHORT_NAME];
++  union {
++    UINT32  PhysicalAddress;
++    UINT32  VirtualSize;
++  } Misc;
++  UINT32  VirtualAddress;
++  UINT32  SizeOfRawData;
++  UINT32  PointerToRawData;
++  UINT32  PointerToRelocations;
++  UINT32  PointerToLinenumbers;
++  UINT16  NumberOfRelocations;
++  UINT16  NumberOfLinenumbers;
++  UINT32  Characteristics;
++} EFI_IMAGE_SECTION_HEADER;
++
++///
++/// Size of EFI_IMAGE_SECTION_HEADER.
++///
++#define EFI_IMAGE_SIZEOF_SECTION_HEADER       40
++
++//
++// Section Flags Values
++//
++#define EFI_IMAGE_SCN_RESERVED_00000000            0x00000000
++#define EFI_IMAGE_SCN_RESERVED_00000001            0x00000001
++#define EFI_IMAGE_SCN_RESERVED_00000002            0x00000002
++#define EFI_IMAGE_SCN_RESERVED_00000004            0x00000004
++#define EFI_IMAGE_SCN_TYPE_NO_PAD                  0x00000008
++#define EFI_IMAGE_SCN_RESERVED_00000010            0x00000010
++#define EFI_IMAGE_SCN_CNT_CODE                     0x00000020
++#define EFI_IMAGE_SCN_CNT_INITIALIZED_DATA         0x00000040
++#define EFI_IMAGE_SCN_CNT_UNINITIALIZED_DATA       0x00000080
++#define EFI_IMAGE_SCN_LNK_OTHER                    0x00000100
++#define EFI_IMAGE_SCN_LNK_INFO                     0x00000200
++#define EFI_IMAGE_SCN_RESERVED_00000400            0x00000400
++#define EFI_IMAGE_SCN_LNK_REMOVE                   0x00000800
++#define EFI_IMAGE_SCN_LNK_COMDAT                   0x00001000
++#define EFI_IMAGE_SCN_RESERVED_00002000            0x00002000
++#define EFI_IMAGE_SCN_RESERVED_00004000            0x00004000
++#define EFI_IMAGE_SCN_GPREL                        0x00008000
++/*
++ * PE 9.3 says both IMAGE_SCN_MEM_PURGEABLE and IMAGE_SCN_MEM_16BIT are
++ * 0x00020000, but I think it's wrong. --pjones
++ */
++#define EFI_IMAGE_SCN_MEM_PURGEABLE                0x00010000 // "Reserved for future use."
++#define EFI_IMAGE_SCN_MEM_16BIT                    0x00020000 // "Reserved for future use."
++#define EFI_IMAGE_SCN_MEM_LOCKED                   0x00040000 // "Reserved for future use."
++#define EFI_IMAGE_SCN_MEM_PRELOAD                  0x00080000 // "Reserved for future use."
++#define EFI_IMAGE_SCN_ALIGN_1BYTES                 0x00100000
++#define EFI_IMAGE_SCN_ALIGN_2BYTES                 0x00200000
++#define EFI_IMAGE_SCN_ALIGN_4BYTES                 0x00300000
++#define EFI_IMAGE_SCN_ALIGN_8BYTES                 0x00400000
++#define EFI_IMAGE_SCN_ALIGN_16BYTES                0x00500000
++#define EFI_IMAGE_SCN_ALIGN_32BYTES                0x00600000
++#define EFI_IMAGE_SCN_ALIGN_64BYTES                0x00700000
++#define EFI_IMAGE_SCN_ALIGN_128BYTES               0x00800000
++#define EFI_IMAGE_SCN_ALIGN_256BYTES               0x00900000
++#define EFI_IMAGE_SCN_ALIGN_512BYTES               0x00a00000
++#define EFI_IMAGE_SCN_ALIGN_1024BYTES              0x00b00000
++#define EFI_IMAGE_SCN_ALIGN_2048BYTES              0x00c00000
++#define EFI_IMAGE_SCN_ALIGN_4096BYTES              0x00d00000
++#define EFI_IMAGE_SCN_ALIGN_8192BYTES              0x00e00000
++#define EFI_IMAGE_SCN_LNK_NRELOC_OVFL              0x01000000
++#define EFI_IMAGE_SCN_MEM_DISCARDABLE              0x02000000
++#define EFI_IMAGE_SCN_MEM_NOT_CACHED               0x04000000
++#define EFI_IMAGE_SCN_MEM_NOT_PAGED                0x08000000
++#define EFI_IMAGE_SCN_MEM_SHARED                   0x10000000
++#define EFI_IMAGE_SCN_MEM_EXECUTE                  0x20000000
++#define EFI_IMAGE_SCN_MEM_READ                     0x40000000
++#define EFI_IMAGE_SCN_MEM_WRITE                    0x80000000
++
++///
++/// Size of a Symbol Table Record.
++///
++#define EFI_IMAGE_SIZEOF_SYMBOL 18
++
++//
++// Symbols have a section number of the section in which they are
++// defined. Otherwise, section numbers have the following meanings:
++//
++#define EFI_IMAGE_SYM_UNDEFINED (UINT16) 0  ///< Symbol is undefined or is common.
++#define EFI_IMAGE_SYM_ABSOLUTE  (UINT16) -1 ///< Symbol is an absolute value.
++#define EFI_IMAGE_SYM_DEBUG     (UINT16) -2 ///< Symbol is a special debug item.
++
++//
++// Symbol Type (fundamental) values.
++//
++#define EFI_IMAGE_SYM_TYPE_NULL   0   ///< no type.
++#define EFI_IMAGE_SYM_TYPE_VOID   1   ///< no valid type.
++#define EFI_IMAGE_SYM_TYPE_CHAR   2   ///< type character.
++#define EFI_IMAGE_SYM_TYPE_SHORT  3   ///< type short integer.
++#define EFI_IMAGE_SYM_TYPE_INT    4
++#define EFI_IMAGE_SYM_TYPE_LONG   5
++#define EFI_IMAGE_SYM_TYPE_FLOAT  6
++#define EFI_IMAGE_SYM_TYPE_DOUBLE 7
++#define EFI_IMAGE_SYM_TYPE_STRUCT 8
++#define EFI_IMAGE_SYM_TYPE_UNION  9
++#define EFI_IMAGE_SYM_TYPE_ENUM   10  ///< enumeration.
++#define EFI_IMAGE_SYM_TYPE_MOE    11  ///< member of enumeration.
++#define EFI_IMAGE_SYM_TYPE_BYTE   12
++#define EFI_IMAGE_SYM_TYPE_WORD   13
++#define EFI_IMAGE_SYM_TYPE_UINT   14
++#define EFI_IMAGE_SYM_TYPE_DWORD  15
++
++//
++// Symbol Type (derived) values.
++//
++#define EFI_IMAGE_SYM_DTYPE_NULL      0 ///< no derived type.
++#define EFI_IMAGE_SYM_DTYPE_POINTER   1
++#define EFI_IMAGE_SYM_DTYPE_FUNCTION  2
++#define EFI_IMAGE_SYM_DTYPE_ARRAY     3
++
++//
++// Storage classes.
++//
++#define EFI_IMAGE_SYM_CLASS_END_OF_FUNCTION   ((UINT8) -1)
++#define EFI_IMAGE_SYM_CLASS_NULL              0
++#define EFI_IMAGE_SYM_CLASS_AUTOMATIC         1
++#define EFI_IMAGE_SYM_CLASS_EXTERNAL          2
++#define EFI_IMAGE_SYM_CLASS_STATIC            3
++#define EFI_IMAGE_SYM_CLASS_REGISTER          4
++#define EFI_IMAGE_SYM_CLASS_EXTERNAL_DEF      5
++#define EFI_IMAGE_SYM_CLASS_LABEL             6
++#define EFI_IMAGE_SYM_CLASS_UNDEFINED_LABEL   7
++#define EFI_IMAGE_SYM_CLASS_MEMBER_OF_STRUCT  8
++#define EFI_IMAGE_SYM_CLASS_ARGUMENT          9
++#define EFI_IMAGE_SYM_CLASS_STRUCT_TAG        10
++#define EFI_IMAGE_SYM_CLASS_MEMBER_OF_UNION   11
++#define EFI_IMAGE_SYM_CLASS_UNION_TAG         12
++#define EFI_IMAGE_SYM_CLASS_TYPE_DEFINITION   13
++#define EFI_IMAGE_SYM_CLASS_UNDEFINED_STATIC  14
++#define EFI_IMAGE_SYM_CLASS_ENUM_TAG          15
++#define EFI_IMAGE_SYM_CLASS_MEMBER_OF_ENUM    16
++#define EFI_IMAGE_SYM_CLASS_REGISTER_PARAM    17
++#define EFI_IMAGE_SYM_CLASS_BIT_FIELD         18
++#define EFI_IMAGE_SYM_CLASS_BLOCK             100
++#define EFI_IMAGE_SYM_CLASS_FUNCTION          101
++#define EFI_IMAGE_SYM_CLASS_END_OF_STRUCT     102
++#define EFI_IMAGE_SYM_CLASS_FILE              103
++#define EFI_IMAGE_SYM_CLASS_SECTION           104
++#define EFI_IMAGE_SYM_CLASS_WEAK_EXTERNAL     105
++
++//
++// type packing constants
++//
++#define EFI_IMAGE_N_BTMASK  017
++#define EFI_IMAGE_N_TMASK   060
++#define EFI_IMAGE_N_TMASK1  0300
++#define EFI_IMAGE_N_TMASK2  0360
++#define EFI_IMAGE_N_BTSHFT  4
++#define EFI_IMAGE_N_TSHIFT  2
++
++//
++// Communal selection types.
++//
++#define EFI_IMAGE_COMDAT_SELECT_NODUPLICATES    1
++#define EFI_IMAGE_COMDAT_SELECT_ANY             2
++#define EFI_IMAGE_COMDAT_SELECT_SAME_SIZE       3
++#define EFI_IMAGE_COMDAT_SELECT_EXACT_MATCH     4
++#define EFI_IMAGE_COMDAT_SELECT_ASSOCIATIVE     5
++
++//
++// the following values only be referred in PeCoff, not defined in PECOFF.
++//
++#define EFI_IMAGE_WEAK_EXTERN_SEARCH_NOLIBRARY  1
++#define EFI_IMAGE_WEAK_EXTERN_SEARCH_LIBRARY    2
++#define EFI_IMAGE_WEAK_EXTERN_SEARCH_ALIAS      3
++
++///
++/// Relocation format.
++///
++typedef struct {
++  UINT32  VirtualAddress;
++  UINT32  SymbolTableIndex;
++  UINT16  Type;
++} EFI_IMAGE_RELOCATION;
++
++///
++/// Size of EFI_IMAGE_RELOCATION
++///
++#define EFI_IMAGE_SIZEOF_RELOCATION 10
++
++//
++// I386 relocation types.
++//
++#define EFI_IMAGE_REL_I386_ABSOLUTE 0x0000  ///< Reference is absolute, no relocation is necessary.
++#define EFI_IMAGE_REL_I386_DIR16    0x0001  ///< Direct 16-bit reference to the symbols virtual address.
++#define EFI_IMAGE_REL_I386_REL16    0x0002  ///< PC-relative 16-bit reference to the symbols virtual address.
++#define EFI_IMAGE_REL_I386_DIR32    0x0006  ///< Direct 32-bit reference to the symbols virtual address.
++#define EFI_IMAGE_REL_I386_DIR32NB  0x0007  ///< Direct 32-bit reference to the symbols virtual address, base not included.
++#define EFI_IMAGE_REL_I386_SEG12    0x0009  ///< Direct 16-bit reference to the segment-selector bits of a 32-bit virtual address.
++#define EFI_IMAGE_REL_I386_SECTION  0x000A
++#define EFI_IMAGE_REL_I386_SECREL   0x000B
++#define EFI_IMAGE_REL_I386_REL32    0x0014  ///< PC-relative 32-bit reference to the symbols virtual address.
++
++//
++// x64 processor relocation types.
++//
++#define IMAGE_REL_AMD64_ABSOLUTE  0x0000
++#define IMAGE_REL_AMD64_ADDR64    0x0001
++#define IMAGE_REL_AMD64_ADDR32    0x0002
++#define IMAGE_REL_AMD64_ADDR32NB  0x0003
++#define IMAGE_REL_AMD64_REL32     0x0004
++#define IMAGE_REL_AMD64_REL32_1   0x0005
++#define IMAGE_REL_AMD64_REL32_2   0x0006
++#define IMAGE_REL_AMD64_REL32_3   0x0007
++#define IMAGE_REL_AMD64_REL32_4   0x0008
++#define IMAGE_REL_AMD64_REL32_5   0x0009
++#define IMAGE_REL_AMD64_SECTION   0x000A
++#define IMAGE_REL_AMD64_SECREL    0x000B
++#define IMAGE_REL_AMD64_SECREL7   0x000C
++#define IMAGE_REL_AMD64_TOKEN     0x000D
++#define IMAGE_REL_AMD64_SREL32    0x000E
++#define IMAGE_REL_AMD64_PAIR      0x000F
++#define IMAGE_REL_AMD64_SSPAN32   0x0010
++
++///
++/// Based relocation format.
++///
++typedef struct {
++  UINT32  VirtualAddress;
++  UINT32  SizeOfBlock;
++} EFI_IMAGE_BASE_RELOCATION;
++
++///
++/// Size of EFI_IMAGE_BASE_RELOCATION.
++///
++#define EFI_IMAGE_SIZEOF_BASE_RELOCATION  8
++
++//
++// Based relocation types.
++//
++#define EFI_IMAGE_REL_BASED_ABSOLUTE        0
++#define EFI_IMAGE_REL_BASED_HIGH            1
++#define EFI_IMAGE_REL_BASED_LOW             2
++#define EFI_IMAGE_REL_BASED_HIGHLOW         3
++#define EFI_IMAGE_REL_BASED_HIGHADJ         4
++#define EFI_IMAGE_REL_BASED_MIPS_JMPADDR    5
++#define EFI_IMAGE_REL_BASED_ARM_MOV32A      5
++#define EFI_IMAGE_REL_BASED_ARM_MOV32T      7
++#define EFI_IMAGE_REL_BASED_IA64_IMM64      9
++#define EFI_IMAGE_REL_BASED_MIPS_JMPADDR16  9
++#define EFI_IMAGE_REL_BASED_DIR64           10
++
++///
++/// Line number format.
++///
++typedef struct {
++  union {
++    UINT32  SymbolTableIndex; ///< Symbol table index of function name if Linenumber is 0.
++    UINT32  VirtualAddress;   ///< Virtual address of line number.
++  } Type;
++  UINT16  Linenumber;         ///< Line number.
++} EFI_IMAGE_LINENUMBER;
++
++///
++/// Size of EFI_IMAGE_LINENUMBER.
++///
++#define EFI_IMAGE_SIZEOF_LINENUMBER 6
++
++//
++// Archive format.
++//
++#define EFI_IMAGE_ARCHIVE_START_SIZE        8
++#define EFI_IMAGE_ARCHIVE_START             "!<arch>\n"
++#define EFI_IMAGE_ARCHIVE_END               "`\n"
++#define EFI_IMAGE_ARCHIVE_PAD               "\n"
++#define EFI_IMAGE_ARCHIVE_LINKER_MEMBER     "/               "
++#define EFI_IMAGE_ARCHIVE_LONGNAMES_MEMBER  "//              "
++
++///
++/// Archive Member Headers
++///
++typedef struct {
++  UINT8 Name[16];     ///< File member name - `/' terminated.
++  UINT8 Date[12];     ///< File member date - decimal.
++  UINT8 UserID[6];    ///< File member user id - decimal.
++  UINT8 GroupID[6];   ///< File member group id - decimal.
++  UINT8 Mode[8];      ///< File member mode - octal.
++  UINT8 Size[10];     ///< File member size - decimal.
++  UINT8 EndHeader[2]; ///< String to end header. (0x60 0x0A).
++} EFI_IMAGE_ARCHIVE_MEMBER_HEADER;
++
++///
++/// Size of EFI_IMAGE_ARCHIVE_MEMBER_HEADER.
++///
++#define EFI_IMAGE_SIZEOF_ARCHIVE_MEMBER_HDR 60
++
++
++//
++// DLL Support
++//
++
++///
++/// Export Directory Table.
++///
++typedef struct {
++  UINT32  Characteristics;
++  UINT32  TimeDateStamp;
++  UINT16  MajorVersion;
++  UINT16  MinorVersion;
++  UINT32  Name;
++  UINT32  Base;
++  UINT32  NumberOfFunctions;
++  UINT32  NumberOfNames;
++  UINT32  AddressOfFunctions;
++  UINT32  AddressOfNames;
++  UINT32  AddressOfNameOrdinals;
++} EFI_IMAGE_EXPORT_DIRECTORY;
++
++///
++/// Hint/Name Table.
++///
++typedef struct {
++  UINT16  Hint;
++  UINT8   Name[1];
++} EFI_IMAGE_IMPORT_BY_NAME;
++
++///
++/// Import Address Table RVA (Thunk Table).
++///
++typedef struct {
++  union {
++    UINT32                    Function;
++    UINT32                    Ordinal;
++    EFI_IMAGE_IMPORT_BY_NAME  *AddressOfData;
++  } u1;
++} EFI_IMAGE_THUNK_DATA;
++
++#define EFI_IMAGE_ORDINAL_FLAG              BIT31    ///< Flag for PE32.
++#define EFI_IMAGE_SNAP_BY_ORDINAL(Ordinal)  ((Ordinal & EFI_IMAGE_ORDINAL_FLAG) != 0)
++#define EFI_IMAGE_ORDINAL(Ordinal)          (Ordinal & 0xffff)
++
++///
++/// Import Directory Table
++///
++typedef struct {
++  UINT32                Characteristics;
++  UINT32                TimeDateStamp;
++  UINT32                ForwarderChain;
++  UINT32                Name;
++  EFI_IMAGE_THUNK_DATA  *FirstThunk;
++} EFI_IMAGE_IMPORT_DESCRIPTOR;
++
++
++///
++/// Debug Directory Format.
++///
++typedef struct {
++  UINT32  Characteristics;
++  UINT32  TimeDateStamp;
++  UINT16  MajorVersion;
++  UINT16  MinorVersion;
++  UINT32  Type;
++  UINT32  SizeOfData;
++  UINT32  RVA;           ///< The address of the debug data when loaded, relative to the image base.
++  UINT32  FileOffset;    ///< The file pointer to the debug data.
++} EFI_IMAGE_DEBUG_DIRECTORY_ENTRY;
++
++#define EFI_IMAGE_DEBUG_TYPE_CODEVIEW 2     ///< The Visual C++ debug information.
++
++///
++/// Debug Data Structure defined in Microsoft C++.
++///
++#define CODEVIEW_SIGNATURE_NB10  SIGNATURE_32('N', 'B', '1', '0')
++typedef struct {
++  UINT32  Signature;                        ///< "NB10"
++  UINT32  Unknown;
++  UINT32  Unknown2;
++  UINT32  Unknown3;
++  //
++  // Filename of .PDB goes here
++  //
++} EFI_IMAGE_DEBUG_CODEVIEW_NB10_ENTRY;
++
++///
++/// Debug Data Structure defined in Microsoft C++.
++///
++#define CODEVIEW_SIGNATURE_RSDS  SIGNATURE_32('R', 'S', 'D', 'S')
++typedef struct {
++  UINT32  Signature;                        ///< "RSDS".
++  UINT32  Unknown;
++  UINT32  Unknown2;
++  UINT32  Unknown3;
++  UINT32  Unknown4;
++  UINT32  Unknown5;
++  //
++  // Filename of .PDB goes here
++  //
++} EFI_IMAGE_DEBUG_CODEVIEW_RSDS_ENTRY;
++
++
++///
++/// Debug Data Structure defined by Apple Mach-O to Coff utility.
++///
++#define CODEVIEW_SIGNATURE_MTOC  SIGNATURE_32('M', 'T', 'O', 'C')
++typedef struct {
++  UINT32    Signature;                       ///< "MTOC".
++  EFI_GUID      MachOUuid;
++  //
++  //  Filename of .DLL (Mach-O with debug info) goes here
++  //
++} EFI_IMAGE_DEBUG_CODEVIEW_MTOC_ENTRY;
++
++///
++/// Resource format.
++///
++typedef struct {
++  UINT32  Characteristics;
++  UINT32  TimeDateStamp;
++  UINT16  MajorVersion;
++  UINT16  MinorVersion;
++  UINT16  NumberOfNamedEntries;
++  UINT16  NumberOfIdEntries;
++  //
++  // Array of EFI_IMAGE_RESOURCE_DIRECTORY_ENTRY entries goes here.
++  //
++} EFI_IMAGE_RESOURCE_DIRECTORY;
++
++///
++/// Resource directory entry format.
++///
++typedef struct {
++  union {
++    struct {
++      UINT32  NameOffset:31;
++      UINT32  NameIsString:1;
++    } s;
++    UINT32  Id;
++  } u1;
++  union {
++    UINT32  OffsetToData;
++    struct {
++      UINT32  OffsetToDirectory:31;
++      UINT32  DataIsDirectory:1;
++    } s;
++  } u2;
++} EFI_IMAGE_RESOURCE_DIRECTORY_ENTRY;
++
++///
++/// Resource directory entry for string.
++///
++typedef struct {
++  UINT16  Length;
++  CHAR16  String[1];
++} EFI_IMAGE_RESOURCE_DIRECTORY_STRING;
++
++///
++/// Resource directory entry for data array.
++///
++typedef struct {
++  UINT32  OffsetToData;
++  UINT32  Size;
++  UINT32  CodePage;
++  UINT32  Reserved;
++} EFI_IMAGE_RESOURCE_DATA_ENTRY;
++
++///
++/// Header format for TE images, defined in the PI Specification, 1.0.
++///
++typedef struct {
++  UINT16                    Signature;            ///< The signature for TE format = "VZ".
++  UINT16                    Machine;              ///< From the original file header.
++  UINT8                     NumberOfSections;     ///< From the original file header.
++  UINT8                     Subsystem;            ///< From original optional header.
++  UINT16                    StrippedSize;         ///< Number of bytes we removed from the header.
++  UINT32                    AddressOfEntryPoint;  ///< Offset to entry point -- from original optional header.
++  UINT32                    BaseOfCode;           ///< From original image -- required for ITP debug.
++  UINT64                    ImageBase;            ///< From original file header.
++  EFI_IMAGE_DATA_DIRECTORY  DataDirectory[2];     ///< Only base relocation and debug directory.
++} EFI_TE_IMAGE_HEADER;
++
++
++#define EFI_TE_IMAGE_HEADER_SIGNATURE  SIGNATURE_16('V', 'Z')
++
++//
++// Data directory indexes in our TE image header
++//
++#define EFI_TE_IMAGE_DIRECTORY_ENTRY_BASERELOC  0
++#define EFI_TE_IMAGE_DIRECTORY_ENTRY_DEBUG      1
++
++
++///
++/// Union of PE32, PE32+, and TE headers.
++///
++typedef union {
++  EFI_IMAGE_NT_HEADERS32   Pe32;
++  EFI_IMAGE_NT_HEADERS64   Pe32Plus;
++  EFI_TE_IMAGE_HEADER      Te;
++} EFI_IMAGE_OPTIONAL_HEADER_UNION;
++
++typedef union {
++  EFI_IMAGE_NT_HEADERS32            *Pe32;
++  EFI_IMAGE_NT_HEADERS64            *Pe32Plus;
++  EFI_TE_IMAGE_HEADER               *Te;
++  EFI_IMAGE_OPTIONAL_HEADER_UNION   *Union;
++} EFI_IMAGE_OPTIONAL_HEADER_PTR_UNION;
++
++typedef struct {
++	WIN_CERTIFICATE Hdr;
++	UINT8           CertData[1];
++} WIN_CERTIFICATE_EFI_PKCS;
++
++#define SHA1_DIGEST_SIZE	20
++#define SHA256_DIGEST_SIZE	32
++#define WIN_CERT_TYPE_PKCS_SIGNED_DATA 0x0002
++
++typedef struct {
++	UINT64 ImageAddress;
++	UINT64 ImageSize;
++	UINT64 EntryPoint;
++	UINTN SizeOfHeaders;
++	UINT16 ImageType;
++	UINT16 NumberOfSections;
++	UINT32 SectionAlignment;
++	EFI_IMAGE_SECTION_HEADER *FirstSection;
++	EFI_IMAGE_DATA_DIRECTORY *RelocDir;
++	EFI_IMAGE_DATA_DIRECTORY *SecDir;
++	UINT64 NumberOfRvaAndSizes;
++	UINT16 DllCharacteristics;
++	EFI_IMAGE_OPTIONAL_HEADER_UNION *PEHdr;
++} PE_COFF_LOADER_IMAGE_CONTEXT;
++
++#endif /* SHIM_PEIMAGE_H */
+diff --git a/include/wincert.h b/include/wincert.h
+new file mode 100644
+index 000000000000..9a5953a5aae2
+--- /dev/null
++++ b/include/wincert.h
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++
++#ifndef SHIM_WINCERT_H
++#define SHIM_WINCERT_H
++
++///
++/// The WIN_CERTIFICATE structure is part of the PE/COFF specification.
++///
++typedef struct {
++  ///
++  /// The length of the entire certificate,
++  /// including the length of the header, in bytes.
++  ///
++  UINT32  dwLength;
++  ///
++  /// The revision level of the WIN_CERTIFICATE
++  /// structure. The current revision level is 0x0200.
++  ///
++  UINT16  wRevision;
++  ///
++  /// The certificate type. See WIN_CERT_TYPE_xxx for the UEFI
++  /// certificate types. The UEFI specification reserves the range of
++  /// certificate type values from 0x0EF0 to 0x0EFF.
++  ///
++  UINT16  wCertificateType;
++  ///
++  /// The following is the actual certificate. The format of
++  /// the certificate depends on wCertificateType.
++  ///
++  /// UINT8 bCertificate[ANYSIZE_ARRAY];
++  ///
++} WIN_CERTIFICATE;
++
++#endif /* SHIM_WINCERT_H */
+diff --git a/post-process-pe.c b/post-process-pe.c
+new file mode 100644
+index 000000000000..008da93b8cd3
+--- /dev/null
++++ b/post-process-pe.c
+@@ -0,0 +1,605 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++/*
++ * post-process-pe.c - fix up timestamps and checksums in broken PE files
++ * Copyright Peter Jones <pjones@redhat.com>
++ */
++
++#define _GNU_SOURCE 1
++
++#include <err.h>
++#include <fcntl.h>
++#include <getopt.h>
++#include <inttypes.h>
++#include <limits.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/param.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++#ifndef PAGE_SIZE
++#define PAGE_SIZE 4096
++#endif
++
++static int verbosity;
++#define ERROR         0
++#define WARNING       1
++#define INFO          2
++#define NOISE         3
++#define MIN_VERBOSITY ERROR
++#define MAX_VERBOSITY NOISE
++#define debug(level, ...)                                        \
++	({                                                       \
++		if (verbosity >= (level)) {                      \
++			printf("%s():%d: ", __func__, __LINE__); \
++			printf(__VA_ARGS__);                     \
++		}                                                \
++		0;                                               \
++	})
++
++static bool set_nx_compat = false;
++static bool require_nx_compat = false;
++
++typedef uint8_t UINT8;
++typedef uint16_t UINT16;
++typedef uint32_t UINT32;
++typedef uint64_t UINT64;
++
++typedef uint16_t CHAR16;
++
++typedef unsigned long UINTN;
++
++typedef struct {
++	UINT32 Data1;
++	UINT16 Data2;
++	UINT16 Data3;
++	UINT8 Data4[8];
++} EFI_GUID;
++
++#include "include/peimage.h"
++
++#if defined(__GNUC__) && defined(__GNUC_MINOR__)
++#define GNUC_PREREQ(maj, min) \
++	((__GNUC__ << 16) + __GNUC_MINOR__ >= ((maj) << 16) + (min))
++#else
++#define GNUC_PREREQ(maj, min) 0
++#endif
++
++#if defined(__clang__) && defined(__clang_major__) && defined(__clang_minor__)
++#define CLANG_PREREQ(maj, min)        \
++	((__clang_major__ > (maj)) || \
++	 (__clang_major__ == (maj) && __clang_minor__ >= (min)))
++#else
++#define CLANG_PREREQ(maj, min) 0
++#endif
++
++#if GNUC_PREREQ(5, 1) || CLANG_PREREQ(3, 8)
++#define add(a0, a1, s) __builtin_add_overflow(a0, a1, s)
++#define sub(s0, s1, d) __builtin_sub_overflow(s0, s1, d)
++#define mul(f0, f1, p) __builtin_mul_overflow(f0, f1, p)
++#else
++#define add(a0, a1, s)                \
++	({                            \
++		(*s) = ((a0) + (a1)); \
++		0;                    \
++	})
++#define sub(s0, s1, d)                \
++	({                            \
++		(*d) = ((s0) - (s1)); \
++		0;                    \
++	})
++#define mul(f0, f1, p)                \
++	({                            \
++		(*p) = ((f0) * (f1)); \
++		0;                    \
++	})
++#endif
++#define div(d0, d1, q)                           \
++	({                                       \
++		unsigned int ret_ = ((d1) == 0); \
++		if (ret_ == 0)                   \
++			(*q) = ((d0) / (d1));    \
++		ret_;                            \
++	})
++
++static int
++image_is_64_bit(EFI_IMAGE_OPTIONAL_HEADER_UNION *PEHdr)
++{
++	/* .Magic is the same offset in all cases */
++	if (PEHdr->Pe32Plus.OptionalHeader.Magic ==
++	    EFI_IMAGE_NT_OPTIONAL_HDR64_MAGIC)
++		return 1;
++	return 0;
++}
++
++static void
++load_pe(const char *const file, void *const data, const size_t datasize,
++        PE_COFF_LOADER_IMAGE_CONTEXT *ctx)
++{
++	EFI_IMAGE_DOS_HEADER *DOSHdr = data;
++	EFI_IMAGE_OPTIONAL_HEADER_UNION *PEHdr = data;
++	size_t HeaderWithoutDataDir, SectionHeaderOffset, OptHeaderSize;
++	size_t FileAlignment = 0;
++	size_t sz0 = 0, sz1 = 0;
++	uintptr_t loc = 0;
++
++	debug(NOISE, "datasize:%zu sizeof(PEHdr->Pe32):%zu\n", datasize,
++	      sizeof(PEHdr->Pe32));
++	if (datasize < sizeof(PEHdr->Pe32))
++		errx(1, "%s: Invalid image size %zu (%zu < %zu)", file,
++		     datasize, datasize, sizeof(PEHdr->Pe32));
++
++	debug(NOISE,
++	      "DOSHdr->e_magic:0x%02hx EFI_IMAGE_DOS_SIGNATURE:0x%02hx\n",
++	      DOSHdr->e_magic, EFI_IMAGE_DOS_SIGNATURE);
++	if (DOSHdr->e_magic != EFI_IMAGE_DOS_SIGNATURE)
++		errx(1,
++		     "%s: Invalid DOS header signature 0x%04hx (expected 0x%04hx)",
++		     file, DOSHdr->e_magic, EFI_IMAGE_DOS_SIGNATURE);
++
++	debug(NOISE, "DOSHdr->e_lfanew:%u datasize:%zu\n", DOSHdr->e_lfanew,
++	      datasize);
++	if (DOSHdr->e_lfanew >= datasize ||
++	    add((uintptr_t)data, DOSHdr->e_lfanew, &loc))
++		errx(1, "%s: invalid pe header location", file);
++
++	ctx->PEHdr = PEHdr = (EFI_IMAGE_OPTIONAL_HEADER_UNION *)loc;
++	debug(NOISE, "PE signature:0x%04x EFI_IMAGE_NT_SIGNATURE:0x%04x\n",
++	      PEHdr->Pe32.Signature, EFI_IMAGE_NT_SIGNATURE);
++	if (PEHdr->Pe32.Signature != EFI_IMAGE_NT_SIGNATURE)
++		errx(1, "%s: Unsupported image type", file);
++
++	if (image_is_64_bit(PEHdr)) {
++		debug(NOISE, "image is 64bit\n");
++		ctx->NumberOfRvaAndSizes =
++			PEHdr->Pe32Plus.OptionalHeader.NumberOfRvaAndSizes;
++		ctx->SizeOfHeaders =
++			PEHdr->Pe32Plus.OptionalHeader.SizeOfHeaders;
++		ctx->ImageSize = PEHdr->Pe32Plus.OptionalHeader.SizeOfImage;
++		ctx->SectionAlignment =
++			PEHdr->Pe32Plus.OptionalHeader.SectionAlignment;
++		ctx->DllCharacteristics = PEHdr->Pe32Plus.OptionalHeader.DllCharacteristics;
++		FileAlignment = PEHdr->Pe32Plus.OptionalHeader.FileAlignment;
++		OptHeaderSize = sizeof(EFI_IMAGE_OPTIONAL_HEADER64);
++	} else {
++		debug(NOISE, "image is 32bit\n");
++		ctx->NumberOfRvaAndSizes =
++			PEHdr->Pe32.OptionalHeader.NumberOfRvaAndSizes;
++		ctx->SizeOfHeaders = PEHdr->Pe32.OptionalHeader.SizeOfHeaders;
++		ctx->ImageSize = (UINT64)PEHdr->Pe32.OptionalHeader.SizeOfImage;
++		ctx->SectionAlignment =
++			PEHdr->Pe32.OptionalHeader.SectionAlignment;
++		ctx->DllCharacteristics = PEHdr->Pe32.OptionalHeader.DllCharacteristics;
++		FileAlignment = PEHdr->Pe32.OptionalHeader.FileAlignment;
++		OptHeaderSize = sizeof(EFI_IMAGE_OPTIONAL_HEADER32);
++	}
++
++	if (FileAlignment % 2 != 0)
++		errx(1, "%s: Invalid file alignment %zu", file, FileAlignment);
++
++	if (FileAlignment == 0)
++		FileAlignment = 0x200;
++	if (ctx->SectionAlignment == 0)
++		ctx->SectionAlignment = PAGE_SIZE;
++	if (ctx->SectionAlignment < FileAlignment)
++		ctx->SectionAlignment = FileAlignment;
++
++	ctx->NumberOfSections = PEHdr->Pe32.FileHeader.NumberOfSections;
++
++	debug(NOISE,
++	      "Number of RVAs:%"PRIu64" EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES:%d\n",
++	      ctx->NumberOfRvaAndSizes, EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES);
++	if (EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES < ctx->NumberOfRvaAndSizes)
++		errx(1, "%s: invalid number of RVAs (%lu entries, max is %d)",
++		     file, (unsigned long)ctx->NumberOfRvaAndSizes,
++		     EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES);
++
++	if (mul(sizeof(EFI_IMAGE_DATA_DIRECTORY),
++	        EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES, &sz0) ||
++	    sub(OptHeaderSize, sz0, &HeaderWithoutDataDir) ||
++	    sub(PEHdr->Pe32.FileHeader.SizeOfOptionalHeader,
++	        HeaderWithoutDataDir, &sz0) ||
++	    mul(ctx->NumberOfRvaAndSizes, sizeof(EFI_IMAGE_DATA_DIRECTORY),
++	        &sz1) ||
++	    (sz0 != sz1)) {
++		if (mul(sizeof(EFI_IMAGE_DATA_DIRECTORY),
++		        EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES, &sz0))
++			debug(ERROR,
++			      "sizeof(EFI_IMAGE_DATA_DIRECTORY) * EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES overflows\n");
++		else
++			debug(ERROR,
++			      "sizeof(EFI_IMAGE_DATA_DIRECTORY) * EFI_IMAGE_NUMBER_OF_DIRECTORY_ENTRIES = %zu\n",
++			      sz0);
++		if (sub(OptHeaderSize, sz0, &HeaderWithoutDataDir))
++			debug(ERROR,
++			      "OptHeaderSize (%zu) - HeaderWithoutDataDir (%zu) overflows\n",
++			      OptHeaderSize, HeaderWithoutDataDir);
++		else
++			debug(ERROR,
++			      "OptHeaderSize (%zu) - HeaderWithoutDataDir (%zu) = %zu\n",
++			      OptHeaderSize, sz0, HeaderWithoutDataDir);
++
++		if (sub(PEHdr->Pe32.FileHeader.SizeOfOptionalHeader,
++		        HeaderWithoutDataDir, &sz0)) {
++			debug(ERROR,
++			      "PEHdr->Pe32.FileHeader.SizeOfOptionalHeader (%d) - %zu overflows\n",
++			      PEHdr->Pe32.FileHeader.SizeOfOptionalHeader,
++			      HeaderWithoutDataDir);
++		} else {
++			debug(ERROR,
++			      "PEHdr->Pe32.FileHeader.SizeOfOptionalHeader (%d)- %zu = %zu\n",
++			      PEHdr->Pe32.FileHeader.SizeOfOptionalHeader,
++			      HeaderWithoutDataDir, sz0);
++		}
++		if (mul(ctx->NumberOfRvaAndSizes,
++		        sizeof(EFI_IMAGE_DATA_DIRECTORY), &sz1))
++			debug(ERROR,
++			      "ctx->NumberOfRvaAndSizes (%ld) * sizeof(EFI_IMAGE_DATA_DIRECTORY) overflows\n",
++			      (unsigned long)ctx->NumberOfRvaAndSizes);
++		else
++			debug(ERROR,
++			      "ctx->NumberOfRvaAndSizes (%ld) * sizeof(EFI_IMAGE_DATA_DIRECTORY) = %zu\n",
++			      (unsigned long)ctx->NumberOfRvaAndSizes, sz1);
++		debug(ERROR,
++		      "space after image header:%zu data directory size:%zu\n",
++		      sz0, sz1);
++
++		errx(1, "%s: image header overflows data directory", file);
++	}
++
++	if (add(DOSHdr->e_lfanew, sizeof(UINT32), &SectionHeaderOffset) ||
++	    add(SectionHeaderOffset, sizeof(EFI_IMAGE_FILE_HEADER),
++	        &SectionHeaderOffset) ||
++	    add(SectionHeaderOffset,
++	        PEHdr->Pe32.FileHeader.SizeOfOptionalHeader,
++	        &SectionHeaderOffset)) {
++		debug(ERROR, "SectionHeaderOffset:%" PRIu32 " + %zu + %zu + %d",
++		      DOSHdr->e_lfanew, sizeof(UINT32),
++		      sizeof(EFI_IMAGE_FILE_HEADER),
++		      PEHdr->Pe32.FileHeader.SizeOfOptionalHeader);
++		errx(1, "%s: SectionHeaderOffset would overflow", file);
++	}
++
++	if (sub(ctx->ImageSize, SectionHeaderOffset, &sz0) ||
++	    div(sz0, EFI_IMAGE_SIZEOF_SECTION_HEADER, &sz0) ||
++	    (sz0 <= ctx->NumberOfSections)) {
++		debug(ERROR, "(%" PRIu64 " - %zu) / %d > %d\n", ctx->ImageSize,
++		      SectionHeaderOffset, EFI_IMAGE_SIZEOF_SECTION_HEADER,
++		      ctx->NumberOfSections);
++		errx(1, "%s: image sections overflow image size", file);
++	}
++
++	if (sub(ctx->SizeOfHeaders, SectionHeaderOffset, &sz0) ||
++	    div(sz0, EFI_IMAGE_SIZEOF_SECTION_HEADER, &sz0) ||
++	    (sz0 < ctx->NumberOfSections)) {
++		debug(ERROR, "(%zu - %zu) / %d >= %d\n", (size_t)ctx->SizeOfHeaders,
++		      SectionHeaderOffset, EFI_IMAGE_SIZEOF_SECTION_HEADER,
++		      ctx->NumberOfSections);
++		errx(1, "%s: image sections overflow section headers", file);
++	}
++
++	if (sub((uintptr_t)PEHdr, (uintptr_t)data, &sz0) ||
++	    add(sz0, sizeof(EFI_IMAGE_OPTIONAL_HEADER_UNION), &sz0) ||
++	    (sz0 > datasize)) {
++		errx(1, "%s: PE Image size %zu > %zu", file, sz0, datasize);
++	}
++
++	if (PEHdr->Pe32.FileHeader.Characteristics & EFI_IMAGE_FILE_RELOCS_STRIPPED)
++		errx(1, "%s: Unsupported image - Relocations have been stripped", file);
++
++	if (image_is_64_bit(PEHdr)) {
++		ctx->ImageAddress = PEHdr->Pe32Plus.OptionalHeader.ImageBase;
++		ctx->EntryPoint =
++			PEHdr->Pe32Plus.OptionalHeader.AddressOfEntryPoint;
++		ctx->RelocDir = &PEHdr->Pe32Plus.OptionalHeader.DataDirectory
++		                         [EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC];
++		ctx->SecDir = &PEHdr->Pe32Plus.OptionalHeader.DataDirectory
++		                       [EFI_IMAGE_DIRECTORY_ENTRY_SECURITY];
++	} else {
++		ctx->ImageAddress = PEHdr->Pe32.OptionalHeader.ImageBase;
++		ctx->EntryPoint =
++			PEHdr->Pe32.OptionalHeader.AddressOfEntryPoint;
++		ctx->RelocDir = &PEHdr->Pe32.OptionalHeader.DataDirectory
++		                         [EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC];
++		ctx->SecDir = &PEHdr->Pe32.OptionalHeader.DataDirectory
++		                       [EFI_IMAGE_DIRECTORY_ENTRY_SECURITY];
++	}
++
++	if (add((uintptr_t)PEHdr, PEHdr->Pe32.FileHeader.SizeOfOptionalHeader,
++	        &loc) ||
++	    add(loc, sizeof(UINT32), &loc) ||
++	    add(loc, sizeof(EFI_IMAGE_FILE_HEADER), &loc))
++		errx(1, "%s: invalid location for first section", file);
++
++	ctx->FirstSection = (EFI_IMAGE_SECTION_HEADER *)loc;
++
++	if (ctx->ImageSize < ctx->SizeOfHeaders)
++		errx(1,
++		     "%s: Image size %"PRIu64" is smaller than header size %lu",
++		     file, ctx->ImageSize, ctx->SizeOfHeaders);
++
++	if (sub((uintptr_t)ctx->SecDir, (uintptr_t)data, &sz0) ||
++	    sub(datasize, sizeof(EFI_IMAGE_DATA_DIRECTORY), &sz1) ||
++	    sz0 > sz1)
++		errx(1,
++		     "%s: security direcory offset %zu past data directory at %zu",
++		     file, sz0, sz1);
++
++	if (ctx->SecDir->VirtualAddress > datasize ||
++	    (ctx->SecDir->VirtualAddress == datasize &&
++	     ctx->SecDir->Size > 0))
++		errx(1, "%s: Security directory extends past end", file);
++}
++
++static void
++set_dll_characteristics(PE_COFF_LOADER_IMAGE_CONTEXT *ctx)
++{
++	uint16_t oldflags, newflags;
++
++	if (image_is_64_bit(ctx->PEHdr)) {
++		oldflags = ctx->PEHdr->Pe32Plus.OptionalHeader.DllCharacteristics;
++	} else {
++		oldflags = ctx->PEHdr->Pe32.OptionalHeader.DllCharacteristics;
++	}
++
++	if (set_nx_compat)
++		newflags = oldflags | EFI_IMAGE_DLLCHARACTERISTICS_NX_COMPAT;
++	else
++		newflags = oldflags & ~(uint16_t)EFI_IMAGE_DLLCHARACTERISTICS_NX_COMPAT;
++	if (oldflags == newflags)
++		return;
++
++	debug(INFO, "Updating DLL Characteristics from 0x%04hx to 0x%04hx\n",
++	      oldflags, newflags);
++	if (image_is_64_bit(ctx->PEHdr)) {
++		ctx->PEHdr->Pe32Plus.OptionalHeader.DllCharacteristics = newflags;
++	} else {
++		ctx->PEHdr->Pe32.OptionalHeader.DllCharacteristics = newflags;
++	}
++	ctx->DllCharacteristics = newflags;
++}
++
++static int
++validate_nx_compat(PE_COFF_LOADER_IMAGE_CONTEXT *ctx)
++{
++	EFI_IMAGE_SECTION_HEADER *Section;
++	int i;
++	bool nx_compat_flag;
++	const int level = require_nx_compat ? ERROR : WARNING;
++	int ret = 0;
++
++	nx_compat_flag = EFI_IMAGE_DLLCHARACTERISTICS_NX_COMPAT
++			 & ctx->DllCharacteristics;
++	debug(NOISE, "NX-Compat-Flag: %s\n", nx_compat_flag ? "set" : "unset");
++	if (!nx_compat_flag) {
++		debug(level, "NX Compatibility flag is not set\n");
++		if (require_nx_compat)
++			ret = -1;
++	}
++
++	debug(NOISE, "Section alignment is 0x%x, page size is 0x%x\n",
++	      ctx->SectionAlignment, PAGE_SIZE);
++	if (ctx->SectionAlignment != PAGE_SIZE) {
++		debug(level, "Section alignment is not page aligned\n");
++		if (require_nx_compat)
++			ret = -1;
++	}
++
++	Section = ctx->FirstSection;
++	for (i=0, Section = ctx->FirstSection; i < ctx->NumberOfSections; i++, Section++) {
++		debug(NOISE, "Section %d has WRITE=%d and EXECUTE=%d\n", i,
++		      (Section->Characteristics & EFI_IMAGE_SCN_MEM_WRITE) ? 1 : 0,
++		      (Section->Characteristics & EFI_IMAGE_SCN_MEM_EXECUTE) ? 1 : 0);
++
++		if ((Section->Characteristics & EFI_IMAGE_SCN_MEM_WRITE) &&
++		    (Section->Characteristics & EFI_IMAGE_SCN_MEM_EXECUTE)) {
++			debug(level, "Section %d is writable and executable\n", i);
++			if (require_nx_compat)
++				ret = -1;
++		}
++	}
++
++	return ret;
++}
++
++static void
++fix_timestamp(PE_COFF_LOADER_IMAGE_CONTEXT *ctx)
++{
++	uint32_t ts;
++
++	if (image_is_64_bit(ctx->PEHdr)) {
++		ts = ctx->PEHdr->Pe32Plus.FileHeader.TimeDateStamp;
++	} else {
++		ts = ctx->PEHdr->Pe32.FileHeader.TimeDateStamp;
++	}
++
++	if (ts != 0) {
++		debug(INFO, "Updating timestamp from 0x%08x to 0\n", ts);
++		if (image_is_64_bit(ctx->PEHdr)) {
++			ctx->PEHdr->Pe32Plus.FileHeader.TimeDateStamp = 0;
++		} else {
++			ctx->PEHdr->Pe32.FileHeader.TimeDateStamp = 0;
++		}
++	}
++}
++
++static void
++fix_checksum(PE_COFF_LOADER_IMAGE_CONTEXT *ctx, void *map, size_t mapsize)
++{
++	uint32_t old;
++	uint32_t checksum = 0;
++	uint16_t word;
++	uint8_t *data = map;
++
++	if (image_is_64_bit(ctx->PEHdr)) {
++		old = ctx->PEHdr->Pe32Plus.OptionalHeader.CheckSum;
++		ctx->PEHdr->Pe32Plus.OptionalHeader.CheckSum = 0;
++	} else {
++		old = ctx->PEHdr->Pe32.OptionalHeader.CheckSum;
++		ctx->PEHdr->Pe32.OptionalHeader.CheckSum = 0;
++	}
++	debug(NOISE, "old checksum was 0x%08x\n", old);
++
++	for (size_t i = 0; i < mapsize - 1; i += 2) {
++		word = (data[i + 1] << 8ul) | data[i];
++		checksum += word;
++		checksum = 0xffff & (checksum + (checksum >> 0x10));
++	}
++	debug(NOISE, "checksum = 0x%08x + 0x%08zx = 0x%08zx\n", checksum,
++	      mapsize, checksum + mapsize);
++
++	checksum += mapsize;
++
++	if (checksum != old)
++		debug(INFO, "Updating checksum from 0x%08x to 0x%08x\n",
++		      old, checksum);
++
++	if (image_is_64_bit(ctx->PEHdr)) {
++		ctx->PEHdr->Pe32Plus.OptionalHeader.CheckSum = checksum;
++	} else {
++		ctx->PEHdr->Pe32.OptionalHeader.CheckSum = checksum;
++	}
++}
++
++static void
++handle_one(char *f)
++{
++	int fd;
++	int rc;
++	struct stat statbuf;
++	size_t sz;
++	void *map;
++	int failed = 0;
++
++	PE_COFF_LOADER_IMAGE_CONTEXT ctx = { 0, 0 };
++
++	fd = open(f, O_RDWR | O_EXCL);
++	if (fd < 0)
++		err(1, "Could not open \"%s\"", f);
++
++	rc = fstat(fd, &statbuf);
++	if (rc < 0)
++		err(1, "Could not stat \"%s\"", f);
++
++	sz = statbuf.st_size;
++
++	map = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++	if (map == MAP_FAILED)
++		err(1, "Could not map \"%s\"", f);
++
++	load_pe(f, map, sz, &ctx);
++
++	set_dll_characteristics(&ctx);
++
++	rc = validate_nx_compat(&ctx);
++	if (rc < 0)
++		err(2, "NX compatibility check failed\n");
++
++	fix_timestamp(&ctx);
++
++	fix_checksum(&ctx, map, sz);
++
++	rc = msync(map, sz, MS_SYNC);
++	if (rc < 0) {
++		warn("msync(%p, %zu, MS_SYNC) failed", map, sz);
++		failed = 1;
++	}
++	rc = munmap(map, sz);
++	if (rc < 0) {
++		warn("munmap(%p, %zu) failed", map, sz);
++		failed = 1;
++	}
++	rc = close(fd);
++	if (rc < 0) {
++		warn("close(%d) failed", fd);
++		failed = 1;
++	}
++	if (failed)
++		exit(1);
++}
++
++static void __attribute__((__noreturn__)) usage(int status)
++{
++	FILE *out = status ? stderr : stdout;
++
++	fprintf(out,
++	        "Usage: post-process-pe [OPTIONS] file0 [file1 [.. fileN]]\n");
++	fprintf(out, "Options:\n");
++	fprintf(out, "       -q    Be more quiet\n");
++	fprintf(out, "       -v    Be more verbose\n");
++	fprintf(out, "       -N    Disable the NX compatibility flag\n");
++	fprintf(out, "       -n    Enable the NX compatibility flag\n");
++	fprintf(out, "       -x    Error on NX incompatibility\n");
++	fprintf(out, "       -h    Print this help text and exit\n");
++
++	exit(status);
++}
++
++int main(int argc, char **argv)
++{
++	int i;
++	struct option options[] = {
++		{.name = "help",
++		 .val = '?',
++		 },
++		{.name = "usage",
++		 .val = '?',
++		 },
++		{.name = "disable-nx-compat",
++		 .val = 'N',
++		},
++		{.name = "enable-nx-compat",
++		 .val = 'n',
++		},
++		{.name = "quiet",
++		 .val = 'q',
++		},
++		{.name = "verbose",
++		 .val = 'v',
++		},
++		{.name = "error-nx-compat",
++		 .val = 'x',
++		},
++		{.name = ""}
++	};
++	int longindex = -1;
++
++	while ((i = getopt_long(argc, argv, "hNnqvx", options, &longindex)) != -1) {
++		switch (i) {
++		case 'h':
++		case '?':
++			usage(longindex == -1 ? 1 : 0);
++			break;
++		case 'N':
++			set_nx_compat = false;
++			break;
++		case 'n':
++			set_nx_compat = true;
++			break;
++		case 'q':
++			verbosity = MAX(verbosity - 1, MIN_VERBOSITY);
++			break;
++		case 'v':
++			verbosity = MIN(verbosity + 1, MAX_VERBOSITY);
++			break;
++		case 'x':
++			require_nx_compat = true;
++			break;
++		}
++	}
++
++	if (optind == argc)
++		usage(1);
++
++	for (i = optind; i < argc; i++)
++		handle_one(argv[i]);
++
++	return 0;
++}
++
++// vim:fenc=utf-8:tw=75:noet

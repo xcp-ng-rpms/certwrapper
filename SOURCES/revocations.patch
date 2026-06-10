@@ -1,0 +1,50 @@
+diff --git a/Makefile b/Makefile
+index ecb7e49..1999a3d 100644
+--- a/Makefile
++++ b/Makefile
+@@ -54,6 +54,7 @@ $(OBJCOPY) --add-section ".$(patsubst %.csv,%,$(1))=$(1)" $(2)
+ 
+ endef
+ 
++REVOCPATH = $(TOPDIR)/data/revocations.csv
+ SBATPATH = $(TOPDIR)/data/sbat.csv
+ VENDOR_SBATS := $(sort $(foreach x,$(wildcard $(TOPDIR)/data/sbat.*.csv data/sbat.*.csv),$(notdir $(x))))
+ 
+@@ -84,7 +85,7 @@ ifeq ($(ARCH),arm)
+ 	BUILDFLAGS += -ffreestanding -I$(shell $(CC) -print-file-name=include)
+ endif
+ 
+-all : certwrapper.efi
++all : certwrapper.efi revocations.efi
+ 
+ certwrapper.so : sbat_data.o certwrapper.o
+ certwrapper.so : SOLIBS=
+@@ -94,6 +95,11 @@ certwrapper.efi : OBJFLAGS = --strip-unneeded $(call VENDOR_DB, $<)
+ certwrapper.efi : SECTIONS=.text .reloc .db .sbat
+ certwrapper.efi : VENDOR_DB_FILE?=db.esl
+ 
++revocations.so : revocations.o certwrapper.o
++revocations.so : SOLIBS=
++revocations.so : SOFLAGS=
++revocations.efi : SECTIONS=.text .reloc .sbat .sbata .sbatl
++
+ %.efi : %.so
+ ifneq ($(OBJCOPY_GTE224),1)
+ 	$(error objcopy >= 2.24 is required)
+@@ -103,6 +109,16 @@ endif
+ 		   $(OBJFLAGS) \
+ 		   $(FORMAT) $^ $@
+ 
++revocations.o : | $(SBATPATH) $(REVOCPATH)
++revocations.o : /dev/null
++	$(CC) $(BUILDFLAGS) -x c -c -o $@ $<
++	$(OBJCOPY) --add-section .sbat=$(SBATPATH) \
++		--set-section-flags .sbat=contents,alloc,load,readonly,data $@
++	$(OBJCOPY) --add-section .sbata=$(REVOCPATH) \
++		--set-section-flags .sbata=contents,alloc,load,readonly,data $@
++	$(OBJCOPY) --add-section .sbatl=$(REVOCPATH) \
++		--set-section-flags .sbatl=contents,alloc,load,readonly,data $@
++
+ sbat_data.o : | $(SBATPATH) $(VENDOR_SBATS)
+ sbat_data.o : /dev/null
+ 	$(CC) $(BUILDFLAGS) -x c -c -o $@ $<
