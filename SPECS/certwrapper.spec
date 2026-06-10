@@ -1,6 +1,6 @@
 %global package_speccommit e48c702f53ee15249e05a168c6fa51f45b0e27a6
 %global usver 20240117
-%global xsver 7
+%global xsver 8
 %global xsrel %{xsver}%{?xscount}%{?xshash}
 %global package_srccommit c443a5fa7210f2dcd12e2b0825e70fda16592d4e
 
@@ -16,6 +16,7 @@ License: BSD-2-Clause-Patent
 
 URL: https://github.com/rhboot/certwrapper
 Source0: certwrapper-20240117.tar.gz
+Source1: revocations.csv
 Patch0: set-sbat-data.patch
 Patch1: revocations.patch
 Patch2: set-nx_compat.patch
@@ -24,7 +25,7 @@ BuildRequires: nss-tools
 BuildRequires: efitools
 BuildRequires: gnu-efi-devel
 BuildRequires: openssl
-BuildRequires: xcpsign-macros
+BuildRequires: xcpsign-macros-test
 
 %description
 This package contains certificates for Secure Boot, packaged in an EFI
@@ -44,12 +45,7 @@ done
 
 sed -i -e 's/@@VERSION@@/%{version}/g' -e 's/@@RELEASE@@/%{release}/g' data/sbat.csv
 
-if [[ -f /etc/pki/xs-secureboot-dev-certs/revocations.csv ]]
-then
-  cp -f /etc/pki/xs-secureboot-dev-certs/revocations.csv data/revocations.csv
-else
-  > data/revocations.csv
-fi
+cp %{SOURCE1} data/revocations.csv
 
 make CFLAGS="-I/usr/include/efi"
 
@@ -68,7 +64,8 @@ install -m 755 revocations-signed.efi %{buildroot}/boot/efi/EFI/xenserver/revoca
 %changelog
 * Wed Jun 10 2026 Corentin Oparowski <corentin.oparowski@vates.tech> - 20240117-8
 - Changed certs for test with xcp-ng
-- Update dependencies to xcpsign-macros
+- Update dependencies to xcpsign-macros-test
+- [WIP] Change source for revocations.csv
 
 * Wed Oct 08 2025 Ross Lagerwall <ross.lagerwall@citrix.com> - 20240117-7
 - CP-47917: Re-sign with new key
