@@ -21,10 +21,12 @@ Patch0: set-sbat-data.patch
 Patch1: revocations.patch
 Patch2: set-nx_compat.patch
 
+BuildRequires: gcc
 BuildRequires: nss-tools
 BuildRequires: efitools
 BuildRequires: gnu-efi-devel
 BuildRequires: openssl
+BuildRequires: sbsigntools
 BuildRequires: xcpsign-macros-test
 
 %description
