@@ -58,7 +58,7 @@ make CFLAGS="-I/usr/include/efi"
 %install
 mkdir -p %{buildroot}/boot/efi/EFI/xenserver
 install -m 755 certwrapper-signed.efi %{buildroot}/boot/efi/EFI/xenserver/shim_certificate_0.efi
-install -m 755 revocations-signed.efi %{buildroot}/boot/efi/EFI/xenserver/revocations.efi
+install -m 755 revocations-signed.efi %{buildroot}/boot/efi/EFI/xenserver/revocations_sbat.efi
 
 %files
 /boot/efi/EFI/xenserver/*
