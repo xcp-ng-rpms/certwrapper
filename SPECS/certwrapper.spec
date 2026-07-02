@@ -10,7 +10,7 @@
 
 Name: certwrapper
 Version: 20240117
-Release: %{?xsrel}%{?dist}
+Release: %{?xsrel}~RevocationTest2.1%{?dist}
 Summary: Contains certificates for Secure Boot
 License: BSD-2-Clause-Patent
 
